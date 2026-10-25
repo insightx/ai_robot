@@ -1,0 +1,18 @@
+{
+  "path_prefix": "文件路径: ",
+  "path_suffix": "\n",
+  "code_prefix": "```\n",
+  "code_suffix": "\n```\n",
+  "show_hidden": false,
+  "show_files": true,
+  "show_folders": true,
+  "use_relative_path": true,
+  "max_depth": 0,
+  "file_filter": "",
+  "language": "en_US",
+  "directory_history": [],
+  "show_advanced_options": false,
+  "enable_easy_multiselect": true,
+  "use_gitignore": true,
+  "is_topmost": false
+}

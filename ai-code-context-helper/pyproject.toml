@@ -1,0 +1,48 @@
+[tool.poetry]
+name = "ai_code_context_helper"
+version = "1.2.0"
+description = "专为AI编程协作设计的代码上下文助手，可视化展示项目结构，支持选择性导出文件路径和代码内容到剪贴板，方便快速向AI助手提供上下文。具备多语言界面、文件过滤、深度控制和自定义格式化输出，让AI更准确理解项目结构并提供针对性代码修改建议。适用于开发者与AI结对编程、代码审查和重构场景。"
+authors = ["sansan"]
+readme = "README.md"
+packages = [{ include = "ai_code_context_helper" }]
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.14"
+cx-freeze = "^8.2.0"
+charset_normalizer = { extras = ["unicode-backport"], version = "^3.4.2" }
+pillow = "^11.2.1"
+pystray = "^0.19.5"
+pynput = "^1.8.1"
+
+[tool.poetry.scripts]
+ai_code_context_helper = "ai_code_context_helper.run:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.cxfreeze]
+executables = [
+    { script = "ai_code_context_helper/run.py", target_name = "AI Code Context Helper.exe", base = "Win32GUI", icon = "ai_code_context_helper/resources/icon.ico" },
+]
+
+[tool.cxfreeze.build_exe]
+packages = [
+    "tkinter",
+    "pathlib",
+    "re",
+    "json",
+    "charset_normalizer",
+    "PIL",
+    "pystray",
+    "threading",
+    "platform",
+    "queue",
+    "pynput",
+    "ai_code_context_helper",
+]
+include_files = [
+    "ai_code_context_helper/resources/default_settings.json",
+    "ai_code_context_helper/resources/weixin.png",
+]
+include_msvcr = true
