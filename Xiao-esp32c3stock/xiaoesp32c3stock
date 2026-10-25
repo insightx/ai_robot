@@ -1,0 +1,487 @@
+/*
+stock 
+update 2025 年 2 月 10 日
+功能：联网实时显示股价信息+天气信息
+oled:ssd1306 iic 
+board:wemos d1r1 esp8266 
+
+1."http://qt.gtimg.cn/q=" + stockCode; 可以获取信息
+2."https://stock.xueqiu.com/v5/stock/quote.json?symbol=" + stockCode;
+雪球网页可以，但是代码返回总是 httpcode=400 ，不知什么原因？
+3.腾讯 数据解析成功； 
+4.weather ok
+5.oled ok 0.96  1.3 all ok 
+6.年月日时间 ok
+7.判断时间，如果在上班且股票开市时间就更新股票，否则直接显示时间和天气；
+8.add hmi display，时间，天气，股票，显示颜色； 
+
+update 2025/02/10 done
+update 2025 年 3 月 23 日
+*/
+#define OLED_ENABLE 1
+
+#include <Wire.h>
+#if OLED_ENABLE
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#endif
+#include <WiFi.h>  // #include <ESP8266WiFi.h>
+#include <HTTPClient.h>  // #include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <ArduinoJson.h>  // ArduinoJson 库保持不变
+
+#define OLED_SDA SDA // D14对应GPIO14
+#define OLED_SCL SCL // D15对应GPIO13（需确认具体板型）
+
+
+int year,month,day,hour,minute,second,weekday=0;
+bool isWeekday,isWorkingTime;
+
+const String stockCode  = "sh600460"; // 士兰微股票代码
+
+const char* ssid        = "your_wifi_ssid";
+const char* password    = "your_wifi_password";
+
+float temperature ; 
+float humidity ; 
+float pressure ; 
+float speed    ;
+
+String cityName;
+String weatherDescription;
+String payload;
+
+// 替换为你的OpenWeatherMap API Key 
+const String apiKey = "your_openweathermap_api_key";
+const String city = "Shenzhen"; 
+const String countryCode = "CN"; // "CN" 代表中国,天气不能频繁获取！
+ 
+// OpenWeatherMap API URL 
+const String endpoint = "http://api.openweathermap.org/data/2.5/weather?q="  + city + "," + countryCode + "&appid=" + apiKey + "&units=metric"; 
+
+// NTP 配置
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 8 * 3600);  // 北京时间偏移量为 +8 小时
+
+#if OLED_ENABLE
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
+#endif
+//================================================
+void getWeatherData() { 
+  WiFiClient client; 
+ 
+  Serial.println("Requesting  URL: " + endpoint); 
+ 
+  if (client.connect("api.openweathermap.org",  80)) { 
+    Serial.println("Connected  to OpenWeatherMap API"); 
+ 
+    client.println("GET  " + endpoint + " HTTP/1.1"); 
+    client.println("Host:  api.openweathermap.org");  
+    client.println("Connection:  close"); 
+    client.println();  
+ 
+    while (client.connected()  &&!client.available())  { 
+      delay(100); 
+    } 
+ 
+    // 跳过HTTP头 
+    String response = ""; 
+    while (client.available())  { 
+      String line = client.readStringUntil('\n');  
+      if (line == "\r") { // HTTP头结束的标志 
+        break; 
+      } 
+    } 
+ 
+    // 读取JSON数据 
+    while (client.available())  { 
+      char c = client.read();  
+      response += c; 
+    } 
+ 
+    client.stop();  
+ 
+    Serial.println("API  Response: " + response); 
+ 
+    DynamicJsonDocument doc(2048); // 增加缓冲区大小 
+    DeserializationError error = deserializeJson(doc, response); 
+ 
+    if (error) { 
+      Serial.print("JSON  parsing failed: "); 
+      Serial.println(error.c_str());  
+      return; 
+    } 
+ 
+    cityName = doc["name"].as<String>(); 
+    weatherDescription = doc["weather"][0]["main"].as<String>(); 
+    temperature = doc["main"]["temp"].as<float>(); 
+    humidity = doc["main"]["humidity"].as<float>(); 
+    pressure = doc["main"]["pressure"].as<float>(); 
+    speed    = doc["wind"]["speed"].as<float>();
+ 
+    Serial.println("......");  
+    Serial.println("simon's  weather report"); 
+    Serial.println("City:  " + cityName); 
+    Serial.println("Weather  main: " + weatherDescription); 
+    Serial.println("Temperature:  " + String(temperature) + " C"); 
+    Serial.println("Humidity:  " + String(humidity) + " %"); 
+    Serial.println("Pressure:  " + String(pressure) + " hPa"); 
+    Serial.println("Wind    :  " + String(speed) + " m/s"); 
+ 
+  } else { 
+    Serial.println("Connection  to OpenWeatherMap API failed"); 
+  } 
+} 
+
+/**
+ * 从股票数据中提取指定索引的参数
+ * @param rawData 原始数据字符串，格式如：v_sh600460="1~士兰微~600460~26.74..."
+ * @param index   要提取的参数索引（从0开始）
+ * @return        对应的参数值，若不存在返回空字符串
+ */
+String getStockParameter(const String &rawData, int index) {
+    // 提取引号内的有效数据
+    int quoteStart = rawData.indexOf('\"');
+    int quoteEnd = rawData.lastIndexOf('\"');
+    if (quoteStart == -1 || quoteEnd == -1 || quoteStart >= quoteEnd) {
+        return "";
+    }
+    String data = rawData.substring(quoteStart + 1, quoteEnd);
+
+    // 遍历查找目标索引
+    int currentIndex = 0;
+    int startPos = 0;
+    int endPos = data.indexOf('~');
+
+    while (currentIndex < index && endPos != -1) {
+        startPos = endPos + 1;
+        endPos = data.indexOf('~', startPos);
+        currentIndex++;
+    }
+
+    // 返回结果处理
+    if (currentIndex != index) return "";
+    return (endPos == -1) ? 
+           data.substring(startPos) : 
+           data.substring(startPos, endPos);
+}
+
+void UPDATE_Time(void)
+{
+    // 更新 NTP 时间
+  timeClient.update();
+
+  // 获取当前时间戳
+  time_t epochTime = timeClient.getEpochTime();  // 使用 time_t 类型
+  struct tm *ptime = gmtime(&epochTime);         // 修复错误
+
+  year = ptime->tm_year + 1900;
+  month = ptime->tm_mon + 1;
+  day = ptime->tm_mday;
+  hour = ptime->tm_hour;
+  minute = ptime->tm_min;
+  second = ptime->tm_sec;
+  weekday = ptime->tm_wday;  // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+
+  // 打印当前时间
+  Serial.printf("Current Time: %04d-%02d-%02d %02d:%02d:%02d\n", year, month, day, hour, minute, second);
+
+  // 判断是否是工作日（周一到周五）
+  isWeekday = (weekday >= 1 && weekday <= 5);
+
+  // 判断是否是上班时间（9:00 - 15:00）
+  isWorkingTime = (hour >= 9 && hour < 15);
+
+  // 输出判断结果
+  Serial.print("Is it a weekday? ");
+  Serial.println(isWeekday ? "Yes" : "No");
+
+  Serial.print("Is it working time? ");
+  Serial.println(isWorkingTime ? "Yes" : "No");
+}
+
+#if OLED_ENABLE
+void SSD1306ON001(void)
+{
+  display.clearDisplay();  
+  display.setTextSize(2);  
+  display.setTextColor(WHITE);  
+  display.setCursor(0,  0); 
+  display.print("welcome STOCK"); 
+  display.display();   
+  delay(500);   
+  display.clearDisplay();
+}
+#endif
+void SSD1306_Display_Stock(void)
+{
+      Serial.println("......");  
+    Serial.println("Simon's  STOCK"); 
+    // 提取关键参数
+    Serial.println("股票代码: "   + getStockParameter(payload, 2));   // 600460
+    Serial.println("当前价格: "   + getStockParameter(payload, 3));   // 26.74
+    Serial.println("涨跌率: "     + getStockParameter(payload, 32));   // 26.74
+    Serial.println("昨收价格: "   + getStockParameter(payload, 4));   // 26.74
+    Serial.println("成交量: "     + getStockParameter(payload, 6));     // 156130   
+
+    // oled显示股票信息
+#if OLED_ENABLE
+    display.clearDisplay();
+    display.setTextColor(WHITE);
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("Stock: " + getStockParameter(payload, 2));
+    display.setCursor(0, 10);
+    display.print("Price: " + getStockParameter(payload, 3) +"   "+ getStockParameter(payload, 32)+" "+"%");
+    display.setCursor(0, 20);
+    display.print("old: " + getStockParameter(payload, 4)+"  " + getStockParameter(payload, 6));
+    display.display();
+#endif
+    //hmi display
+  
+    char str[30];
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 0, getStockParameter(payload, 2));
+    Serial1.print(str);  
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 1, getStockParameter(payload, 3));
+    Serial1.print(str);  
+    float result = getStockParameter(payload, 32).toFloat();
+    if(result<0)
+    {
+      sprintf(str, "t%d.pco=2016\xff\xff\xff", 2);//2016,green
+    }else{
+      sprintf(str, "t%d.pco=63488\xff\xff\xff", 2);//63488,red
+    }
+    Serial1.print(str);  
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 2, getStockParameter(payload, 32)+"%");
+    Serial1.print(str);  
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 3, getStockParameter(payload, 4));
+    Serial1.print(str);  
+
+    // 在SSD1306上显示天气信息 
+    char timeStr[10];
+    char dayStr[11];
+    
+    sprintf(timeStr, "%02d:%02d", hour, minute);
+    sprintf(dayStr, "%04d-%02d-%02d", year, month,day);
+
+    //hmi
+    // sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 2, dayStr);
+    // Serial1.print(str);
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 4, timeStr);
+    Serial1.print(str);
+    // printDay(weekday);
+}
+void printDay(int weekly) {
+  if (weekly >= 0 && weekly <= 6) {
+    char str1[10];
+    // 根据weekly的值打印对应的英文星期几
+    switch (weekly) {
+      case 0:
+        sprintf(str1, "t%d.txt=\"%s\"\xff\xff\xff", 1, "Sunday");
+        Serial1.print(str1);
+        break;
+      case 1:
+        sprintf(str1, "t%d.txt=\"%s\"\xff\xff\xff", 1, "Monday");
+        Serial1.print(str1);
+        break;
+      case 2:
+        sprintf(str1, "t%d.txt=\"%s\"\xff\xff\xff", 1, "Tuesday");
+        Serial1.print(str1);
+        break;
+      case 3:
+        sprintf(str1, "t%d.txt=\"%s\"\xff\xff\xff", 1, "Wednesday");
+        Serial1.print(str1);
+        break;
+      case 4:
+        sprintf(str1, "t%d.txt=\"%s\"\xff\xff\xff", 1, "Thursday");
+        Serial1.print(str1);
+        break;
+      case 5:
+        sprintf(str1, "t%d.txt=\"%s\"\xff\xff\xff", 1, "Friday");
+        Serial1.print(str1);
+        break;
+      case 6:
+        sprintf(str1, "t%d.txt=\"%s\"\xff\xff\xff", 1, "Saturday");
+        Serial1.print(str1);
+        break;
+    }
+  } else {
+    Serial1.println("between 1 and 7.");
+  }
+}
+void SSD1306_Display_Time(void){
+    
+    char timeStr[10];
+    char dayStr[11];
+    //用sprintf来格式化字符串，给n0的val属性赋值
+    char str[22];
+    
+    sprintf(timeStr, "%02d:%02d", hour, minute);
+    sprintf(dayStr, "%04d-%02d-%02d", year, month,day);
+
+    //hmi
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 2, dayStr);
+    Serial1.print(str);
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 0, timeStr);
+    Serial1.print(str);
+    printDay(weekday);
+    
+    // oled显示股票信息
+#if OLED_ENABLE
+    display.clearDisplay();
+    display.setTextColor(WHITE);
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print(String(dayStr)+"  "+"weekly: "+ String(weekday));
+    display.setTextSize(2);
+    display.setCursor(15, 16);
+    display.print(String(timeStr));
+    // display.display();
+
+    // 在SSD1306上显示天气信息 
+    display.setTextSize(1);
+    display.setCursor(0,  35); 
+    display.print("City:" + cityName+" " + weatherDescription); 
+    display.setCursor(0,  45); 
+    display.print("T:" + String(temperature) + "C"+"   "+"H:" + String(humidity) + "%"); 
+    display.setCursor(0,  55); 
+    display.print(String(pressure) + " hPa"+" " + String(speed) + " m/s"); 
+    display.display();  
+#endif
+
+    //hmi display
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 3, cityName);
+    Serial1.print(str);
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 4, weatherDescription);
+    Serial1.print(str);
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 5, String(temperature) + "C");
+    Serial1.print(str);
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 6, String(humidity) + "%");
+    Serial1.print(str);   
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 7, String(pressure) + "hPa");
+    Serial1.print(str);
+    sprintf(str, "t%d.txt=\"%s\"\xff\xff\xff", 8, String(speed) + " m/s");
+    Serial1.print(str);   
+
+}
+#if OLED_ENABLE
+void iic_scanner(void)
+{
+    int nDevices = 0;
+
+  Serial.println("Scanning...");
+
+  for (byte address = 1; address < 127; ++address) {
+    Wire.beginTransmission(address);
+    byte error = Wire.endTransmission();
+
+    if (error == 0) {
+      Serial.print("I2C device found at address 0x");
+      if (address < 16) {
+        Serial.print("0");
+      }
+      Serial.print(address, HEX);
+      Serial.println("  !");
+      ++nDevices;
+    } else if (error == 4) {
+      Serial.print("Unknown error at address 0x");
+      if (address < 16) {
+        Serial.print("0");
+      }
+      Serial.println(address, HEX);
+    }
+  }
+  if (nDevices == 0) {
+    Serial.println("No I2C devices found\n");
+  } else {
+    Serial.println("done,read iic device!\n");
+  }
+}
+#endif
+
+//--------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200);
+  Wire.begin(OLED_SDA, OLED_SCL); // 手动指定I2C引脚
+#if OLED_ENABLE
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // 初始化OLED，地址0x3C
+  display.clearDisplay();
+
+  iic_scanner();
+  SSD1306ON001();
+
+  Serial1.print("uart1 tx hmi start...");
+  Serial.println("Connecting  to WiFi..."); 
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print("Connecting to WiFi..."); 
+  display.display();
+#else
+  Serial1.print("uart1 tx hmi start...");
+  Serial.println("Connecting  to WiFi..."); 
+#endif
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+  }
+  Serial.println("\nConnected  to WiFi"); 
+  Serial.print("IP  地址: ");
+  Serial.println(WiFi.localIP()); 
+#if OLED_ENABLE
+  display.clearDisplay();
+#endif
+  
+  // 获取天气数据 
+  getWeatherData();
+
+  // 初始化 NTP 客户端
+  timeClient.begin();
+  Serial.println("Syncing time with NTP server...");
+  while (timeClient.update() && !timeClient.getEpochTime()) {
+    delay(1000);
+  } 
+  Serial.println("Time synced!");
+
+
+}
+
+void loop() {
+  UPDATE_Time();
+  if(isWeekday && isWorkingTime){
+      if (WiFi.status() == WL_CONNECTED) {
+      WiFiClient client; // 创建WiFiClient对象
+      HTTPClient http;
+      // String url = "https://stock.xueqiu.com/v5/stock/quote.json?symbol=" + stockCode;
+
+      String url = "http://qt.gtimg.cn/q=" + stockCode;
+      http.begin(client, url); // 使用WiFiClient初始化HTTP请求
+
+      int httpCode = http.GET();
+      Serial.println("HTTP Code: " + String(httpCode)); // 打印HTTP状态码
+
+        if (httpCode == 200) {
+        payload = http.getString();
+        Serial.println(payload); // 打印返回的JSON数据
+        SSD1306_Display_Stock();
+        } else {
+        // 显示HTTP错误信息
+#if OLED_ENABLE
+        display.clearDisplay();
+        display.setCursor(0, 0); display.print("HTTP Error: " + String(httpCode));
+        display.display();
+#endif
+        Serial.println("HTTP Error: " + String(httpCode)); 
+        }
+      http.end();
+    }
+
+  }else{
+    SSD1306_Display_Time();
+  }
+
+  delay(10000); // 每6s更新一次
+}

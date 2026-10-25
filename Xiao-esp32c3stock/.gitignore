@@ -1,0 +1,22 @@
+# Arduino / ESP32 build
+build/
+*.hex
+*.elf
+*.bin
+*.map
+tests/*.exe
+.tools/
+
+# PlatformIO
+.pio/
+
+# IDE
+.vscode/
+.idea/
+
+# 本地凭证（复制 secrets.h.example 为 secrets.h）
+secrets.h
+
+# OS
+.DS_Store
+Thumbs.db
